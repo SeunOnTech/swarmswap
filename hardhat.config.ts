@@ -21,10 +21,18 @@ const config: HardhatUserConfig = {
       url: "https://evmrpc-testnet.0g.ai", 
       chainId: 16602,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
+    },
+    "sepolia": {
+      url: "https://rpc.sepolia.org",
+      chainId: 11155111,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
     }
   },
   etherscan: {
-    apiKey: { "0g-galileo": "placeholder" }, 
+    apiKey: { 
+      "0g-galileo": "placeholder",
+      "sepolia": process.env.ETHERSCAN_API_KEY || ""
+    }, 
     customChains: [{
       network: "0g-galileo",
       chainId: 16602,
