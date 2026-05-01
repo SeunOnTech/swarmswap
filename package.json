@@ -1,0 +1,32 @@
+{
+  "name": "swarmswap",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.26.2",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "~5.0.0",
+    "@nomicfoundation/hardhat-verify": "~2.0.14",
+    "@types/node": "^25.6.0",
+    "hardhat": "~2.22.19",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@0gfoundation/0g-storage-ts-sdk": "1.2.8",
+    "@openzeppelin/contracts": "^5.6.1",
+    "@reown/appkit": "^1.8.19",
+    "@reown/appkit-adapter-wagmi": "^1.8.19",
+    "@tanstack/react-query": "^5.100.7",
+    "dotenv": "^17.4.2",
+    "ethers": "~6.13.7",
+    "viem": "^2.48.7",
+    "wagmi": "^3.6.9"
+  }
+}
