@@ -8,22 +8,28 @@ export async function agentCycle(
   agentRole: 'analyzer' | 'risk' | 'executor',
   privateKey: string,
   uniswapApiKey: string,
-  stateRootHash: string
+  stateRootHash: string,
+  tokenId: number
 ) {
   // 0G Signer (Coordination)
-  const ogProvider = new ethers.JsonRpcProvider(NETWORKS.galileo.rpc);
+  const ogProvider = new ethers.JsonRpcProvider(NETWORKS.galileo.rpc, undefined, { staticNetwork: true });
   const ogSigner = new ethers.Wallet(privateKey, ogProvider);
   const storage = new SwarmStorage(privateKey);
 
-  // Sepolia Signer (Execution)
-  const sepoliaProvider = new ethers.JsonRpcProvider(NETWORKS.sepolia.rpc);
+  // Sepolia Signer (Service Executor)
+  const sepoliaProvider = new ethers.JsonRpcProvider(NETWORKS.sepolia.rpc, { chainId: 11155111, name: 'sepolia' }, { staticNetwork: true });
   const sepoliaSigner = new ethers.Wallet(privateKey, sepoliaProvider);
 
   console.log(`[${agentRole}] Starting cycle...`);
 
   // 1. Download current state from 0G Storage
   const state = await storage.downloadJson(stateRootHash);
-  console.log(`[${agentRole}] Current state:`, state.pool);
+  
+  if (!state || !state.token0 || !state.token1) {
+    throw new Error(`State for Agent #${tokenId} is missing required token info.`);
+  }
+
+  console.log(`[${agentRole}] Current state: ${state.pool || 'Managed'}`);
 
   // 2. Get Uniswap quote for analysis (Sepolia Chain)
   const quote = await getUniswapQuote({
@@ -72,10 +78,10 @@ export async function agentCycle(
               ogSigner
           );
           
-          // In a real flow, tokenId would be in state. Here we use 1 for demo
-          const anchorTx = await agentContract.updateState(1, proposalHash, txHash);
+          // In a real flow, tokenId would be in state. Here we use the passed tokenId
+          const anchorTx = await agentContract.updateState(tokenId, proposalHash, txHash);
           await anchorTx.wait();
-          console.log(`[executor] Execution anchored on 0G Galileo!`);
+          console.log(`[executor] [Agent #${tokenId}] Execution anchored on 0G Galileo!`);
       }
   }
   

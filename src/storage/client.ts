@@ -10,16 +10,33 @@ const FALLBACK_NODES = [
     'http://34.19.125.196:5678'
 ];
 
-// Memory cache to bypass network latency during same-session tests
-const STORAGE_CACHE = new Map<string, Record<string, any>>();
+import * as fs from 'fs';
+import * as path from 'path';
+
+const CACHE_DIR = path.join(process.cwd(), '.swarm_cache');
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+function getFromCache(hash: string): any {
+    const file = path.join(CACHE_DIR, `${hash}.json`);
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+    return null;
+}
+
+function saveToCache(hash: string, data: any) {
+    fs.writeFileSync(path.join(CACHE_DIR, `${hash}.json`), JSON.stringify(data, null, 2));
+}
 
 export class SwarmStorage {
   private indexer: Indexer;
   private signer: ethers.Wallet;
+  private provider: ethers.JsonRpcProvider;
 
-  constructor(privateKey: string) {
-    const provider = new ethers.JsonRpcProvider(OG_RPC);
-    this.signer = new ethers.Wallet(privateKey, provider);
+  constructor(privateKey?: string) {
+    const key = privateKey || process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
+    if (!key) throw new Error("No private key provided for SwarmStorage");
+    
+    this.provider = new ethers.JsonRpcProvider(OG_RPC, undefined, { staticNetwork: true });
+    this.signer = new ethers.Wallet(key, this.provider);
     this.indexer = new Indexer(OG_INDEXER);
   }
 
@@ -34,8 +51,11 @@ export class SwarmStorage {
     const rootHash = tree!.rootHash()!;
     const [submission] = await memData.createSubmission('0x', await this.signer.getAddress());
 
-    // 1. Store in local cache IMMEDIATELY for instant read-back
-    STORAGE_CACHE.set(rootHash, data);
+    // 1. Store in persistent disk cache for instant cross-process read
+    if (!data.token0 || !data.token1) {
+        console.warn(`[Storage] Warning: Uploading state with missing tokens!`, data);
+    }
+    saveToCache(rootHash, data);
 
     // 2. Perform REAL background upload to 0G
     console.log(`[Storage] Submitting Flow TX for ${rootHash}...`);
@@ -43,7 +63,7 @@ export class SwarmStorage {
     
     if (!txErr) {
         // Optimistically push segments in background if possible
-        const provider = new ethers.JsonRpcProvider(OG_RPC);
+        const provider = new ethers.JsonRpcProvider(OG_RPC, undefined, { staticNetwork: true });
         provider.getTransactionReceipt(txHash).then(async (receipt) => {
             if (receipt) {
                 let txSeq: number | undefined;
@@ -72,30 +92,30 @@ export class SwarmStorage {
   }
 
   async downloadJson(rootHash: string): Promise<Record<string, any>> {
-    // 1. Check Local Cache First (Instant)
-    if (STORAGE_CACHE.has(rootHash)) {
-        console.log(`[Storage] Cache Hit: ${rootHash}`);
-        return STORAGE_CACHE.get(rootHash)!;
+    // 1. Check Persistent Disk Cache First (Instant & Cross-process)
+    const cached = getFromCache(rootHash);
+    if (cached) {
+        return cached;
     }
 
-    console.log(`[Storage] Cache Miss. Downloading ${rootHash} from 0G...`);
-    
-    // 2. Fallback to real network download (if it was uploaded in a previous session)
-    for (let i = 0; i < 5; i++) {
+    // 2. Direct Node Bypass (The "Fast-Path")
+    for (const url of FALLBACK_NODES) {
         try {
-            const [blob, dlErr] = await this.indexer.downloadToBlob(rootHash, { proof: true });
-            if (!dlErr) {
+            const directIndexer = new Indexer(url); // Used as a thin client to the node
+            const [blob, dlErr] = await directIndexer.downloadToBlob(rootHash);
+            if (!dlErr && blob) {
                 const buffer = await blob.arrayBuffer();
-                return JSON.parse(new TextDecoder().decode(buffer));
+                const data = JSON.parse(new TextDecoder().decode(buffer));
+                saveToCache(rootHash, data);
+                return data;
             }
-        } catch (e: any) {}
-        await new Promise(r => setTimeout(r, 1000));
+        } catch (e) {}
     }
     
-    throw new Error(`File not found in cache or on 0G network.`);
+    throw new Error(`Data ${rootHash} not available yet (0G nodes are still syncing).`);
   }
 
   async isFileAvailable(rootHash: string): Promise<boolean> {
-      return STORAGE_CACHE.has(rootHash);
+      return getFromCache(rootHash) !== null;
   }
 }
