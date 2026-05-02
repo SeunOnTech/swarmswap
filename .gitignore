@@ -10,4 +10,4 @@ frontend/.next/
 frontend/out/
 .DS_Store
 pnpm-debug.log
-scripts/full_test.ts
+scripts/
