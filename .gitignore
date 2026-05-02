@@ -11,3 +11,5 @@ frontend/out/
 .DS_Store
 pnpm-debug.log
 scripts/
+.swarm_cache/
+frontend/components/onboarding/OnboardingFlow.tsx
