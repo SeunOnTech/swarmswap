@@ -99,14 +99,19 @@ contract SwarmSwapAgent is ERC721, ERC2981, Ownable, IERC7857 {
     }
 
     function mintAgent(
+        address to,
         string memory configURI,
         string memory stateURI,
         address royaltyReceiver,
         uint96 royaltyBPS
     ) external returns (uint256) {
         uint256 tokenId = ++_nextTokenId;
-        _mint(msg.sender, tokenId);
+        _mint(to, tokenId);
         _setTokenRoyalty(tokenId, royaltyReceiver, royaltyBPS);
+        
+        _authorizations[tokenId][msg.sender] = abi.encodePacked(bytes4(0x7857abcd));
+        emit UsageAuthorized(tokenId, msg.sender);
+
         agents[tokenId] = AgentState({
             configURI: configURI,
             stateURI: stateURI,
@@ -117,11 +122,15 @@ contract SwarmSwapAgent is ERC721, ERC2981, Ownable, IERC7857 {
     }
 
     function updateState(uint256 tokenId, string memory newStateURI, bytes32 executionTxHash) external {
-        require(ownerOf(tokenId) == msg.sender, "Not owner");
+        require(ownerOf(tokenId) == msg.sender || this.hasPermission(tokenId, msg.sender, 0x7857abcd), "Not authorized");
         agents[tokenId].stateURI = newStateURI;
         agents[tokenId].totalTrades += 1;
         agents[tokenId].lastRebalance = block.timestamp;
         emit ExecutionAnchored(tokenId, executionTxHash, block.timestamp);
+    }
+
+    function totalAgents() external view returns (uint256) {
+        return _nextTokenId;
     }
 
     function hasPermission(uint256 tokenId, address executor, bytes4 action) external view returns (bool) {
