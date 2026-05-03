@@ -9,7 +9,15 @@ import { SwarmController } from './api/swarm.controller';
 
 dotenv.config();
 
-// Deeply squelch the 0G Storage SDK logs by overriding stdout
+// Prevent any uncaught async rejection from crashing the process.
+// Engines have their own catch blocks; this is a last-resort safety net.
+process.on('unhandledRejection', (reason: any) => {
+  process.stdout.write(`[WARN] Unhandled rejection (non-fatal): ${reason?.message || reason}\n`);
+});
+process.on('uncaughtException', (err: Error) => {
+  process.stdout.write(`[WARN] Uncaught exception (non-fatal): ${err.message}\n`);
+});
+
 const originalStdoutWrite = process.stdout.write.bind(process.stdout);
 (process.stdout as any).write = function(chunk: any, encoding: any, cb: any) {
   if (typeof chunk === 'string') {
@@ -43,11 +51,14 @@ async function main() {
   const logger = new LoggerService();
   const controller = new SwarmController(blockchain, storage, logger);
 
-  // Persistence: restart whitelisted agents on boot
   await controller.resyncAgents();
 
   const fastify = Fastify({ logger: false });
   await fastify.register(cors, { origin: true });
+
+  fastify.get('/', async () => {
+    return { status: 'ok', service: 'SwarmSwap', timestamp: new Date().toISOString() };
+  });
 
   // GET /api/agent — return the agent's EOA for frontend delegation scoping
   fastify.get('/api/agent', async () => {
@@ -70,12 +81,10 @@ async function main() {
     }
   });
 
-  // GET /api/swarms — list all running swarms
   fastify.get('/api/swarms', async () => {
     return { swarms: controller.getSwarms() };
   });
 
-  // POST /api/swarms/:swarmId/stop — gracefully stop the execution loop for this swarm
   fastify.post('/api/swarms/:swarmId/stop', async (request, reply) => {
     const { swarmId } = request.params as { swarmId: string };
     const result = controller.stopEngine(swarmId);
@@ -83,7 +92,6 @@ async function main() {
     return { ok: true };
   });
 
-  // GET /api/swarms/:swarmId/stream — SSE event stream for a specific swarm
   fastify.get('/api/swarms/:swarmId/stream', (request, reply) => {
     const { swarmId } = request.params as { swarmId: string };
 
@@ -95,7 +103,6 @@ async function main() {
 
     const unsubscribe = logger.subscribe((event) => {
       const d = event.data || {};
-      // Send if event belongs to this swarm, or is a global event (no swarm_id)
       if (!d.swarm_id || d.swarm_id === swarmId || swarmId === 'all') {
         reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
       }

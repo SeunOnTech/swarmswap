@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "concurrently \"pnpm --prefix frontend dev\" \"pnpm exec ts-node src/index.ts\""
+    "dev": "concurrently \"pnpm --prefix frontend dev\" \"pnpm exec ts-node src/index.ts\"",
+    "build": "pnpm --prefix frontend build",
+    "start": "ts-node src/index.ts"
   },
   "keywords": [],
   "author": "",
@@ -17,10 +19,9 @@
     "@types/node": "^25.6.0",
     "concurrently": "^9.2.1",
     "hardhat": "~2.22.19",
-    "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
-  },
   "dependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3",
     "@0gfoundation/0g-compute-ts-sdk": "^0.8.0",
     "@0gfoundation/0g-storage-ts-sdk": "1.2.8",
     "@ethersproject/providers": "5.7.2",
