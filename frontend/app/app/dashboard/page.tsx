@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { getSwarms, subscribeToSwarm, type SwarmInfo } from "@/lib/api";
 import { AssetLogo } from "@/components/AssetLogo";
@@ -19,7 +19,7 @@ function LogoIcon() {
 
 type LiveEvent = { time: string; text: string; tag?: string };
 
-export default function DashboardPage() {
+function DashboardContent() {
   const searchParams = useSearchParams();
   const [swarms, setSwarms] = useState<SwarmInfo[]>([]);
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
@@ -218,6 +218,14 @@ export default function DashboardPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense fallback={<div>Loading Dashboard...</div>}>
+      <DashboardContent />
+    </Suspense>
   );
 }
 
