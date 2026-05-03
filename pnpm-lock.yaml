@@ -53,6 +53,12 @@ importers:
       permissionless:
         specifier: ^0.3.5
         version: 0.3.5(viem@2.48.7(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@3.25.76))
+      ts-node:
+        specifier: ^10.9.2
+        version: 10.9.2(@types/node@25.6.0)(typescript@6.0.3)
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
       viem:
         specifier: ^2.48.7
         version: 2.48.7(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@3.25.76)
@@ -75,12 +81,6 @@ importers:
       hardhat:
         specifier: ~2.22.19
         version: 2.22.19(bufferutil@4.1.0)(ts-node@10.9.2(@types/node@25.6.0)(typescript@6.0.3))(typescript@6.0.3)(utf-8-validate@5.0.10)
-      ts-node:
-        specifier: ^10.9.2
-        version: 10.9.2(@types/node@25.6.0)(typescript@6.0.3)
-      typescript:
-        specifier: ^6.0.3
-        version: 6.0.3
 
 packages:
 
