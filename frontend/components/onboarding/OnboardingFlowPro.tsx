@@ -14,8 +14,10 @@ import {
   toMetaMaskSmartAccount
 } from '@metamask/smart-accounts-kit';
 import { createCaveatBuilder } from '@metamask/smart-accounts-kit/utils';
-import { type Hex, type Address } from 'viem';
+import { type Hex, type Address, parseEther } from 'viem';
 import { useWalletClient, usePublicClient } from 'wagmi';
+import { AssetLogo, TokenPairLogos } from "@/components/AssetLogo";
+import { BRAND_LOGO_URLS, getChainLogoUrl } from "@/lib/assetLogos";
 
 type ChainName = "Ethereum" | "Arbitrum" | "Base" | "Sepolia";
 type SponsorshipTier = "Free" | "Pro" | "Custom";
@@ -197,20 +199,41 @@ export default function OnboardingFlowPro() {
         .addCaveat('redeemer', { redeemers: [agentAddress] })
         .build();
 
+      // FunctionCall scope:
+      //   targets[0] = SwapRouter02        → exactInputSingle (ERC20 swaps)
+      //   targets[1] = WETH (Sepolia)      → deposit() (ETH→WETH wrapping)
+      // valueLte caps the ETH the agent can ever send in a single call to 0.003 ETH,
+      // which covers a full wrap of the funded amount without giving open-ended access.
       const delegation = createDelegation({
         to: agentAddress,
         from: userSmartAccount.address,
         environment,
         scope: {
           type: ScopeType.FunctionCall,
-          targets: ['0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E'], 
-          selectors: ['0x04e45aaf'] 
+          targets: [
+            '0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E',  // SwapRouter02
+            '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14',  // WETH Sepolia
+          ],
+          selectors: [
+            '0x04e45aaf',  // exactInputSingle
+            '0xd0e30db0',  // WETH.deposit()
+            '0x095ea7b3',  // approve()
+          ],
+          valueLte: { maxValue: parseEther('1') }
         },
         caveats
       });
 
       const signature = await userSmartAccount.signDelegation({ delegation });
-      const signedDelegation = { ...delegation, signature };
+      const signedDelegation = {
+        chainId: (delegation as any).chainId,
+        from: (delegation as any).from,
+        to: (delegation as any).to,
+        salt: (delegation as any).salt,
+        scope: (delegation as any).scope,
+        caveats: (delegation as any).caveats,
+        signature
+      };
 
       const result = await createSwarm(
         address,
@@ -428,8 +451,14 @@ export default function OnboardingFlowPro() {
                       }
                     >
                       <div className="position-top">
-                        <strong>{p.pool}</strong>
-                        <span>{p.chain}</span>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                          <TokenPairLogos pool={p.pool} size={16} />
+                          <strong>{p.pool}</strong>
+                        </div>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <AssetLogo src={getChainLogoUrl(p.chain)} alt="" size={14} />
+                          {p.chain}
+                        </span>
                       </div>
                       <div className="position-meta">
                         <p>Fee {p.feeTier}</p>
@@ -473,7 +502,10 @@ export default function OnboardingFlowPro() {
                   <li>Functions: exactInputSingle, mint, burn, collect</li>
                   <li>Max gas budget: 0.5 ETH/month</li>
                   <li>Expiry: 30 days renewable</li>
-                  <li>Chain: Ethereum Mainnet</li>
+                  <li style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <AssetLogo src={getChainLogoUrl("Ethereum")} alt="" size={16} />
+                    Chain: Ethereum Mainnet
+                  </li>
                 </ul>
               </div>
               <Segmented label="Sponsorship Tier" options={["Free", "Pro", "Custom"]} value={sponsorshipTier} onChange={setSponsorshipTier} />
@@ -488,7 +520,10 @@ export default function OnboardingFlowPro() {
             <>
               {!swarmId ? (
                 <>
-                  <h1>Mint swarm on 0G Galileo</h1>
+                  <h1 style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={24} />
+                    Mint swarm on 0G Galileo
+                  </h1>
                   <p className="sub">
                     Sign the delegation policy using your wallet to authorize the agent, then create the swarm on-chain.
                   </p>
@@ -510,7 +545,10 @@ export default function OnboardingFlowPro() {
                 </>
               ) : (
                 <>
-                  <h1>iNFT minted on 0G Galileo</h1>
+                  <h1 style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={24} />
+                    iNFT minted on 0G Galileo
+                  </h1>
                   <p className="sub">ERC-7857 agent token deployed. Config and state are content-addressed on 0G Storage.</p>
                   <div className="snapshot">
                     <p><span className="snapshot-label">Swarm ID</span><strong>{swarmId}</strong></p>

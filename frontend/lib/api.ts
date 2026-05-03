@@ -33,7 +33,7 @@ export async function createSwarm(
   const res = await fetch(`${API_BASE}/api/swarms/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userAddress, amount, smartAccountAddress, delegation, environmentVersion, pimlicoRpcUrl })
+    body: JSON.stringify({ userAddress, amount, smartAccountAddress, delegation, environmentVersion, pimlicoRpcUrl }, (_, v) => typeof v === 'bigint' ? v.toString() : v)
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Unknown error' }));
