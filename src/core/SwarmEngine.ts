@@ -1,5 +1,7 @@
 import { Contract, ethers, formatUnits, JsonRpcProvider, keccak256, toUtf8Bytes } from 'ethers';
 import { Address, Hex } from 'viem';
+import * as fs from 'fs';
+import * as path from 'path';
 import { BlockchainService } from '../services/blockchain.service';
 import { StorageService } from '../services/storage.service';
 import { SwapService } from '../services/swap.service';
@@ -44,7 +46,6 @@ export class SwarmEngine {
     this.tokenId = tokenId;
   }
 
-  /** Signal the loop to finish after the current cycle (or before heavy execute work). */
   public stop(): void {
     if (!this.running) return;
     this.running = false;
@@ -55,7 +56,6 @@ export class SwarmEngine {
     return this.running;
   }
 
-  // Injects swarm_id into every event so SSE clients can filter correctly
   private emit(type: string, data: Record<string, any>) {
     this.logger.emit(type, { ...data, swarm_id: this.swarmId, token_id: this.tokenId });
   }
@@ -138,7 +138,17 @@ export class SwarmEngine {
     this.emit('LOOP_START', { swarm_id: this.swarmId, token_id: this.tokenId });
     const swarmAgent = new Contract(CONFIG.CONTRACTS.SWARM_AGENT, SWARM_AGENT_ABI, this.blockchain.agentOgWallet);
 
-    const hasPerm = await swarmAgent.hasPermission(BigInt(this.tokenId), this.blockchain.agentWallet.address, CONFIG.ACTION_PERMISSION);
+    // Permission check — retry up to 3× on transient OG RPC errors before giving up
+    let hasPerm = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        hasPerm = await swarmAgent.hasPermission(BigInt(this.tokenId), this.blockchain.agentWallet.address, CONFIG.ACTION_PERMISSION);
+        break;
+      } catch (err: any) {
+        if (attempt === 2) throw new Error(`Permission check failed after 3 attempts: ${err.message}`);
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
     if (!hasPerm) throw new Error(`Agent lacks permission ${CONFIG.ACTION_PERMISSION}`);
 
     this.emit('AGENT_READY', { agent: this.blockchain.agentWallet.address });
@@ -149,8 +159,11 @@ export class SwarmEngine {
 
         // 1. OBSERVE
         const realTick = await this.fetchLiveTick();
-        const feeData = await this.blockchain.sepoliaProvider.getFeeData();
-        const gasGwei = Number(feeData.gasPrice || 0n) / 1e9;
+        let gasGwei = 0;
+        try {
+          const feeData = await this.blockchain.callWithRetry(p => p.getFeeData());
+          gasGwei = Number(feeData.gasPrice || 0n) / 1e9;
+        } catch { /* non-critical — gas display degrades gracefully */ }
         this.emit('OBSERVE', { real_tick: realTick, source: 'mainnet_weth_usdc_0.05pct' });
 
         // 2. RECALL
@@ -159,6 +172,20 @@ export class SwarmEngine {
         const state = await this.storage.downloadJson(stateRootHash) as RuntimeState;
         const configRootHash = (agentData.configURI as string).replace(/^ipfs:\/\//, '');
         const config = await this.storage.downloadJson(configRootHash) as RuntimeConfig;
+
+        // LOCAL OVERRIDE: Check for local delegation backup to bypass 0G issues
+        try {
+          const backupPath = path.join(process.cwd(), 'storage', 'delegations.json');
+          if (fs.existsSync(backupPath)) {
+            const backups = JSON.parse(fs.readFileSync(backupPath, 'utf8'));
+            if (backups[this.swarmId]) {
+              console.log(`💾 Using local delegation backup for Swarm: ${this.swarmId}`);
+              config.delegation = backups[this.swarmId];
+            }
+          }
+        } catch (err) {
+          console.error('Failed to load local delegation backup:', err);
+        }
 
         if (!config?.smart_account) throw new Error('Agent config malformed or missing smart_account');
         const smartAccountAddress = config.smart_account.address;
@@ -240,23 +267,32 @@ export class SwarmEngine {
         let ogBlock = 0;
         try { ogBlock = Number(await this.blockchain.ogProvider.getBlockNumber()); } catch {}
 
-        // Fetch real balances
-        let wethBalance = "0";
+        // Fetch real balances — sequential + callWithRetry to avoid batch rate limits
+        // USDC is token0, WETH is token1 in the mainnet pool → ETH price = 1e12 / 1.0001^tick
+        const ethPriceUsd = 1e12 / Math.pow(1.0001, realTick);
+        let nativeEthBalance = "0";
+        let wethERC20Balance = "0";
         let usdcBalance = "0";
         let positionValue = "0.00";
         try {
-          const wethContract = new Contract(CONFIG.TOKENS.WETH.address, ERC20_ABI, this.blockchain.sepoliaProvider);
-          const usdcContract = new Contract(CONFIG.TOKENS.USDC.address, ERC20_ABI, this.blockchain.sepoliaProvider);
-          const rawWeth = await wethContract.balanceOf(smartAccountAddress);
-          const rawUsdc = await usdcContract.balanceOf(smartAccountAddress);
-          wethBalance = formatUnits(rawWeth, CONFIG.TOKENS.WETH.decimals);
-          usdcBalance = formatUnits(rawUsdc, CONFIG.TOKENS.USDC.decimals);
-          
-          const currentEthPrice = Math.pow(1.0001, realTick);
-          const totalVal = (Number(wethBalance) * currentEthPrice) + Number(usdcBalance);
-          positionValue = totalVal.toFixed(2);
-        } catch(e) {
-          console.error("Failed to fetch real balances", e);
+          const rawNative = await this.blockchain.callWithRetry(p => p.getBalance(smartAccountAddress));
+          await new Promise(r => setTimeout(r, 80));
+          const rawWeth = await this.blockchain.callWithRetry(p =>
+            new Contract(CONFIG.TOKENS.WETH.address, ERC20_ABI, p).balanceOf(smartAccountAddress)
+          );
+          await new Promise(r => setTimeout(r, 80));
+          const rawUsdc = await this.blockchain.callWithRetry(p =>
+            new Contract(CONFIG.TOKENS.USDC.address, ERC20_ABI, p).balanceOf(smartAccountAddress)
+          );
+          const nativeNum = Number(formatUnits(rawNative, 18));
+          const wethNum   = Number(formatUnits(rawWeth, CONFIG.TOKENS.WETH.decimals));
+          const usdcNum   = Number(formatUnits(rawUsdc, CONFIG.TOKENS.USDC.decimals));
+          nativeEthBalance = nativeNum.toFixed(4);
+          wethERC20Balance = wethNum.toFixed(4);
+          usdcBalance = usdcNum.toFixed(2);
+          positionValue = ((nativeNum + wethNum) * ethPriceUsd + usdcNum).toFixed(2);
+        } catch {
+          // Non-fatal — metrics show last known values
         }
 
         this.emit('METRICS', {
@@ -267,9 +303,11 @@ export class SwarmEngine {
           latest_og_block: ogBlock,
           storage_used_kb: (this.storage.bytesUploaded / 1024).toFixed(1),
           network_status: ogBlock > 0 ? 'Live' : 'Degraded',
-          weth_balance: wethBalance,
+          eth_balance: nativeEthBalance,
+          weth_balance: wethERC20Balance,
           usdc_balance: usdcBalance,
           position_value: positionValue,
+          eth_price_usd: ethPriceUsd.toFixed(0),
           smart_account_address: smartAccountAddress
         });
 
@@ -300,81 +338,183 @@ export class SwarmEngine {
     agentData: any
   ) {
     if (!this.running) return;
-    const currentAsset = state.current_asset || 'WETH';
-    const nextAsset = currentAsset === 'USDC' ? 'WETH' : 'USDC';
     const smartAccountAddress = config.smart_account.address as Address;
     const delegationManagerAddress = config.smart_account.delegation_manager as string;
 
-    const tokenIn = currentAsset === 'USDC' ? CONFIG.TOKENS.USDC : CONFIG.TOKENS.WETH;
-    const tokenOut = currentAsset === 'USDC' ? CONFIG.TOKENS.WETH : CONFIG.TOKENS.USDC;
+    // 1. READ ACTUAL BALANCES — sequential calls to avoid drpc.org batch limit
+    const nativeEthRaw = await this.blockchain.callWithRetry(p => p.getBalance(smartAccountAddress));
+    await new Promise(r => setTimeout(r, 80));
+    const wethRaw = await this.blockchain.callWithRetry(p =>
+      new Contract(CONFIG.TOKENS.WETH.address, ERC20_ABI, p).balanceOf(smartAccountAddress).then(BigInt)
+    );
+    await new Promise(r => setTimeout(r, 80));
+    const usdcRaw = await this.blockchain.callWithRetry(p =>
+      new Contract(CONFIG.TOKENS.USDC.address, ERC20_ABI, p).balanceOf(smartAccountAddress).then(BigInt)
+    );
+    const nativeEthDisplay = formatUnits(nativeEthRaw, 18);
+    const wethDisplay = formatUnits(wethRaw, CONFIG.TOKENS.WETH.decimals);
+    const usdcDisplay = formatUnits(usdcRaw, CONFIG.TOKENS.USDC.decimals);
 
-    const tokenContract = new Contract(tokenIn.address, ERC20_ABI, this.blockchain.sepoliaProvider);
-    const amountToSwap = BigInt(await tokenContract.balanceOf(smartAccountAddress));
+    this.emit('BALANCE_CHECK', { native_eth: nativeEthDisplay, weth: wethDisplay, usdc: usdcDisplay, smart_account: smartAccountAddress });
+    this.emit('LOG', { tag: 'EXECUTOR', message: `Balance check: ${nativeEthDisplay} native ETH | ${wethDisplay} WETH | ${usdcDisplay} USDC in ${smartAccountAddress.slice(0, 10)}…`, color: 'orange' });
 
-    if (amountToSwap === 0n) {
-      this.emit('WARN', { message: `Smart account has no ${currentAsset} balance — skipping`, current_asset: currentAsset });
+    // Auto-wrap native ETH → WETH via delegation when no ERC20 balance exists
+    let effectiveWethRaw = wethRaw;
+    if (wethRaw === 0n && usdcRaw === 0n && nativeEthRaw > 0n) {
+      this.emit('LOG', { tag: 'EXECUTOR', message: `⚡ Native ETH detected — attempting auto-wrap ${nativeEthDisplay} ETH → WETH via delegation…`, color: 'orange' });
+      try {
+        const wrapAmount = ethers.parseEther('0.002');
+        const wrapCalldata = DelegationManager.encode.redeemDelegations({
+          delegations: [[config.delegation as any]],
+          modes: [ExecutionMode.SingleDefault],
+          executions: [[createExecution({ target: CONFIG.TOKENS.WETH.address as Address, value: wrapAmount, callData: '0xd0e30db0' as Hex })]]
+        });
+        const wrapGas = await this.blockchain.callWithRetry(p => p.estimateGas({
+          to: delegationManagerAddress, from: this.blockchain.agentWallet.address, data: wrapCalldata
+        }));
+        const wrapTx = await this.blockchain.agentWallet.sendTransaction({
+          to: delegationManagerAddress, data: wrapCalldata, gasLimit: (wrapGas * 130n) / 100n
+        });
+        this.emit('CONFIRMING', { tx_hash: wrapTx.hash, explorer: `https://sepolia.etherscan.io/tx/${wrapTx.hash}`, swap: 'ETH→WETH', stage: 'wrap' });
+        this.emit('LOG', { tag: 'EXECUTOR', message: `Wrap TX submitted: ${wrapTx.hash.slice(0, 14)}… — waiting for Sepolia confirmation…`, color: 'orange' });
+        await wrapTx.wait(1);
+        this.emit('WRAP_CONFIRMED', { tx_hash: wrapTx.hash, explorer: `https://sepolia.etherscan.io/tx/${wrapTx.hash}`, amount: '0.002' });
+        this.emit('LOG', { tag: 'EXECUTOR', message: `✅ Wrapped 0.002 ETH → WETH · ${wrapTx.hash.slice(0, 14)}… · https://sepolia.etherscan.io/tx/${wrapTx.hash}`, color: 'orange' });
+        await new Promise(r => setTimeout(r, 80));
+        effectiveWethRaw = await this.blockchain.callWithRetry(p =>
+          new Contract(CONFIG.TOKENS.WETH.address, ERC20_ABI, p).balanceOf(smartAccountAddress).then(BigInt)
+        );
+      } catch (wrapErr: any) {
+        const reason = wrapErr?.revert?.args?.[0] || wrapErr?.reason || wrapErr?.message || 'unknown';
+        this.emit('WARN', { message: `Auto-wrap failed: ${reason}`, smart_account: smartAccountAddress });
+        this.emit('LOG', { tag: 'EXECUTOR', message: `⚠️ Auto-wrap failed (${reason.slice(0, 120)}). Fund the smart account with WETH directly or re-run onboarding.`, color: 'gold' });
+        return;
+      }
+    }
+
+    // Determine swap direction from ERC20 balances (effectiveWethRaw reflects post-wrap state)
+    let fromAsset: string, toAsset: string, tokenIn: any, tokenOut: any, amountToSwap: bigint;
+    if (effectiveWethRaw > 0n) {
+      fromAsset = 'WETH'; toAsset = 'USDC';
+      tokenIn = CONFIG.TOKENS.WETH; tokenOut = CONFIG.TOKENS.USDC;
+      amountToSwap = effectiveWethRaw;
+    } else if (usdcRaw > 0n) {
+      fromAsset = 'USDC'; toAsset = 'WETH';
+      tokenIn = CONFIG.TOKENS.USDC; tokenOut = CONFIG.TOKENS.WETH;
+      amountToSwap = usdcRaw;
+    } else {
+      this.emit('WARN', { message: 'Smart account has no swappable balance — fund with WETH or USDC first.', smart_account: smartAccountAddress });
+      this.emit('LOG', { tag: 'EXECUTOR', message: '⚠️ Zero swappable balance — fund the smart account to enable rebalancing.', color: 'gold' });
       return;
     }
 
-    const amountDisplay = `${formatUnits(amountToSwap, tokenIn.decimals)} ${currentAsset}`;
-    this.emit('EXECUTING', { swap: `${currentAsset}→${nextAsset}`, amount: amountDisplay, smart_account: smartAccountAddress });
-    this.emit('LOG', { tag: 'EXECUTOR', message: `Submitting REBALANCE to Uniswap V3 — ${currentAsset}→${nextAsset} primary route, 0.30% fee tier`, color: 'orange' });
+    const amountDisplay = `${formatUnits(amountToSwap, tokenIn.decimals)} ${fromAsset}`;
+    this.emit('EXECUTING', { swap: `${fromAsset}→${toAsset}`, amount: amountDisplay, smart_account: smartAccountAddress });
+    this.emit('LOG', { tag: 'EXECUTOR', message: `Submitting REBALANCE: ${amountDisplay} → ${toAsset} via Uniswap V3 SwapRouter02`, color: 'orange' });
 
+    // 2. GET QUOTE
     const apiQuote = await this.swap.getUniswapAPIQuote(tokenIn.address as Address, tokenOut.address as Address, amountToSwap, smartAccountAddress);
-
     let swapCalldata: Hex, swapTo: Address, minOut: string, quoteSource: string;
     const swapValue = 0n;
-
     if (apiQuote) {
-      swapCalldata = apiQuote.calldata as Hex;
-      swapTo = apiQuote.to as Address;
-      minOut = apiQuote.amountOut;
-      quoteSource = 'uniswap_trading_api';
+      swapCalldata = apiQuote.calldata as Hex; swapTo = apiQuote.to as Address;
+      minOut = apiQuote.amountOut; quoteSource = 'uniswap_trading_api';
     } else {
-      const fallback = await this.swap.generateFallbackCalldata(tokenIn, tokenOut, amountToSwap, smartAccountAddress);
-      swapCalldata = fallback.calldata as Hex;
-      swapTo = fallback.router as Address;
-      minOut = fallback.minOut.toString();
-      quoteSource = 'swapRouter02_direct';
+      const fb = await this.swap.generateFallbackCalldata(tokenIn, tokenOut, amountToSwap, smartAccountAddress);
+      swapCalldata = fb.calldata as Hex; swapTo = fb.router as Address;
+      minOut = fb.minOut.toString(); quoteSource = 'swapRouter02_direct';
+    }
+    this.emit('QUOTE', { source: quoteSource, min_out: minOut, token_out: toAsset });
+
+    // 2.5 CHECK & EXECUTE APPROVAL IF NEEDED
+    try {
+      const erc20 = new Contract(tokenIn.address, ERC20_ABI, this.blockchain.sepoliaProvider);
+      const allowance = await this.blockchain.callWithRetry(p => erc20.allowance(smartAccountAddress, CONFIG.CONTRACTS.SEPOLIA.SWAP_ROUTER_02));
+      
+      if (allowance < amountToSwap) {
+        this.emit('LOG', { tag: 'EXECUTOR', message: `Allowing SwapRouter02 to spend ${fromAsset}…`, color: 'orange' });
+        const approveData = erc20.interface.encodeFunctionData('approve', [CONFIG.CONTRACTS.SEPOLIA.SWAP_ROUTER_02, ethers.MaxUint256]);
+        const approveRedemption = DelegationManager.encode.redeemDelegations({
+          delegations: [[config.delegation as any]],
+          modes: [ExecutionMode.SingleDefault],
+          executions: [[createExecution({ target: tokenIn.address as Address, value: 0n, callData: approveData as Hex })]]
+        });
+        
+        const approveTx = await this.blockchain.agentWallet.sendTransaction({
+          to: delegationManagerAddress,
+          data: approveRedemption,
+          gasLimit: 150000n
+        });
+        this.emit('CONFIRMING', { tx_hash: approveTx.hash, explorer: `https://sepolia.etherscan.io/tx/${approveTx.hash}`, swap: 'APPROVE', stage: 'approve' });
+        this.emit('LOG', { tag: 'EXECUTOR', message: `Approval TX submitted: ${approveTx.hash.slice(0, 14)}… — waiting for Sepolia confirmation…`, color: 'orange' });
+        await approveTx.wait(1);
+        this.emit('APPROVE_CONFIRMED', { tx_hash: approveTx.hash, explorer: `https://sepolia.etherscan.io/tx/${approveTx.hash}` });
+        this.emit('LOG', { tag: 'EXECUTOR', message: `✅ Allowance granted.`, color: 'orange' });
+      }
+    } catch (approveErr: any) {
+      this.emit('LOG', { tag: 'EXECUTOR', message: `⚠️ Approval check/execution failed: ${approveErr.message}`, color: 'gold' });
+      // We continue anyway as the allowance might actually be sufficient or the error might be transient
     }
 
-    this.emit('QUOTE', { source: quoteSource, min_out: minOut, token_out: nextAsset });
-
+    // 3. BUILD REDEMPTION CALLDATA
     const redemptionCalldata = DelegationManager.encode.redeemDelegations({
       delegations: [[config.delegation as any]],
       modes: [ExecutionMode.SingleDefault],
       executions: [[createExecution({ target: swapTo, value: swapValue, callData: swapCalldata })]]
     });
 
-    // Estimate gas with 20% buffer
-    const gasEstimate = await this.blockchain.sepoliaProvider.estimateGas({
-      to: delegationManagerAddress,
-      from: this.blockchain.agentWallet.address,
-      data: redemptionCalldata
-    });
-    const gasLimit = (gasEstimate * 120n) / 100n;
+    // 4. ESTIMATE GAS — structured failure with reason
+    let gasLimit: bigint;
+    try {
+      const gasEstimate = await this.blockchain.callWithRetry(p => p.estimateGas({
+        to: delegationManagerAddress, from: this.blockchain.agentWallet.address, data: redemptionCalldata
+      }));
+      gasLimit = (gasEstimate * 120n) / 100n;
+    } catch (gasErr: any) {
+      const reason = gasErr?.revert?.args?.[0] || gasErr?.reason || gasErr?.message || 'Unknown revert reason';
+      this.emit('SWAP_FAILED', { stage: 'gas_estimation', reason, swap: `${fromAsset}→${toAsset}`, smart_account: smartAccountAddress });
+      this.emit('LOG', { tag: 'EXECUTOR', message: `❌ Gas estimation failed (${fromAsset}→${toAsset}): ${reason}`, color: 'red' });
+      throw gasErr;
+    }
 
     this.emit('BROADCASTING', { delegation_manager: delegationManagerAddress, gas_limit: gasLimit.toString() });
 
-    const tx = await this.blockchain.agentWallet.sendTransaction({
-      to: delegationManagerAddress,
-      data: redemptionCalldata,
-      gasLimit
-    });
-    const receipt = await tx.wait(1);
-    if (!receipt || receipt.status !== 1) throw new Error(`Swap reverted: ${tx.hash}`);
+    // 5. BROADCAST — structured failure
+    let tx: any;
+    try {
+      tx = await this.blockchain.agentWallet.sendTransaction({ to: delegationManagerAddress, data: redemptionCalldata, gasLimit });
+    } catch (broadcastErr: any) {
+      this.emit('SWAP_FAILED', { stage: 'broadcast', reason: broadcastErr.message, swap: `${fromAsset}→${toAsset}` });
+      this.emit('LOG', { tag: 'EXECUTOR', message: `❌ Broadcast failed: ${broadcastErr.message}`, color: 'red' });
+      throw broadcastErr;
+    }
 
-    this.emit('LOG', { tag: 'EXECUTOR', message: `Route confirmed. Tx: ${receipt.hash.slice(0, 12)}… · gas: ${(Number(receipt.gasUsed) / 1000).toFixed(0)}k units`, color: 'orange' });
-    this.emit('EXECUTED', { swap: `${currentAsset}→${nextAsset}`, tx_hash: receipt.hash, gas_used: receipt.gasUsed.toString(), explorer: `https://sepolia.etherscan.io/tx/${receipt.hash}` });
+    // Immediately stream tx hash so frontend can track before confirmation
+    this.emit('CONFIRMING', { tx_hash: tx.hash, explorer: `https://sepolia.etherscan.io/tx/${tx.hash}`, swap: `${fromAsset}→${toAsset}` });
+    this.emit('LOG', { tag: 'EXECUTOR', message: `TX submitted: ${tx.hash.slice(0, 14)}… — waiting for Sepolia confirmation…`, color: 'orange' });
 
-    // ANCHOR
-    this.emit('LOG', { tag: 'MEMORY', message: `Anchoring decision to 0G Galileo. Proof hash: ${consensusHash.slice(0, 12)}…`, color: 'purple' });
+    // 6. WAIT FOR CONFIRMATION — structured failure with explorer link
+    let receipt: any;
+    try {
+      receipt = await tx.wait(1);
+      if (!receipt || receipt.status !== 1) throw new Error('Transaction reverted on-chain');
+    } catch (confirmErr: any) {
+      const explorer = `https://sepolia.etherscan.io/tx/${tx.hash}`;
+      this.emit('SWAP_FAILED', { stage: 'confirmation', reason: confirmErr.message, tx_hash: tx.hash, explorer, swap: `${fromAsset}→${toAsset}` });
+      this.emit('LOG', { tag: 'EXECUTOR', message: `❌ Swap reverted: ${tx.hash.slice(0, 14)}… | ${confirmErr.message} | ${explorer}`, color: 'red' });
+      throw confirmErr;
+    }
+
+    this.emit('LOG', { tag: 'EXECUTOR', message: `✅ Route confirmed. Tx: ${receipt.hash.slice(0, 14)}… · gas: ${(Number(receipt.gasUsed) / 1000).toFixed(0)}k units`, color: 'orange' });
+    this.emit('EXECUTED', { swap: `${fromAsset}→${toAsset}`, tx_hash: receipt.hash, gas_used: receipt.gasUsed.toString(), explorer: `https://sepolia.etherscan.io/tx/${receipt.hash}`, status: 'SUCCESS' });
+
+    // 7. ANCHOR — with gap-filling events
+    this.emit('ANCHORING', { message: 'Uploading new state to 0G Storage…', swap: `${fromAsset}→${toAsset}` });
+    this.emit('LOG', { tag: 'MEMORY', message: `Anchoring decision to 0G Galileo. Proof: ${consensusHash.slice(0, 12)}…`, color: 'purple' });
+
     const newState: RuntimeState = {
-      ...state,
-      current_asset: nextAsset,
-      current_tick: realTick,
-      last_tick: state.current_tick || realTick,
-      last_consensus_hash: consensusHash,
+      ...state, current_asset: toAsset as any, current_tick: realTick,
+      last_tick: state.current_tick || realTick, last_consensus_hash: consensusHash,
       updated_at: Math.floor(Date.now() / 1000)
     };
     const newStateURI = await this.storage.uploadJson(`/swarms/${this.swarmId}/state_snapshot.json`, newState);
@@ -382,28 +522,20 @@ export class SwarmEngine {
     await anchorTx.wait();
 
     const totalTrades = Number(agentData.totalTrades) + 1;
-    this.emit('ANCHORED', { og_tx: anchorTx.hash, new_state_root: newStateURI, current_asset: nextAsset, total_trades: totalTrades });
+    this.emit('ANCHORED', { og_tx: anchorTx.hash, new_state_root: newStateURI, current_asset: toAsset, total_trades: totalTrades });
     this.emit('LOG', { tag: 'MEMORY', message: `0G Storage write confirmed. Block: ${await this.blockchain.ogProvider.getBlockNumber()} · ${(this.storage.bytesUploaded / 1024).toFixed(1)} KB stored.`, color: 'purple' });
 
     this.anchorCount += 3;
     this.emit('ANCHOR', { event_type: 'LINEAGE_UPDATE', hash: anchorTx.hash.slice(0, 18), description: `iNFT state updated — ${totalTrades} ancestor${totalTrades !== 1 ? 's' : ''} linked` });
     this.emit('ANCHOR', { event_type: 'MEMORY_ANCHOR', hash: newStateURI.slice(0, 18), description: `Run #${this.cycleCount} state anchored to 0G Galileo` });
     this.emit('ANCHOR', { event_type: 'PROOF_VERIFY', hash: receipt.hash.slice(0, 18), description: `Rebalance tx stored — ${(this.storage.bytesUploaded / 1024).toFixed(1)} KB on 0G Storage` });
-    this.emit('LOG', { tag: 'EXECUTOR', message: `Settlement complete. Net position: ${nextAsset} asset locked for this cycle.`, color: 'orange' });
+    this.emit('LOG', { tag: 'EXECUTOR', message: `Settlement complete. Net position: ${toAsset} locked for this cycle.`, color: 'orange' });
 
-    // Fire-and-forget execution log
     this.storage.uploadJson(`/swarms/${this.swarmId}/executions/${receipt.hash}.json`, {
-      tx_hash: receipt.hash,
-      chain_id: CONFIG.SEPOLIA.chainId,
-      swap: `${currentAsset}→${nextAsset}`,
-      smart_account: smartAccountAddress,
-      amount_in: amountDisplay,
-      tick_at_execution: realTick,
-      gas_used: receipt.gasUsed.toString(),
-      amount_out_min: minOut,
-      quote_source: quoteSource,
-      status: 'SUCCESS',
-      timestamp: Math.floor(Date.now() / 1000)
+      tx_hash: receipt.hash, chain_id: CONFIG.SEPOLIA.chainId, swap: `${fromAsset}→${toAsset}`,
+      smart_account: smartAccountAddress, amount_in: amountDisplay, tick_at_execution: realTick,
+      gas_used: receipt.gasUsed.toString(), amount_out_min: minOut, quote_source: quoteSource,
+      status: 'SUCCESS', timestamp: Math.floor(Date.now() / 1000)
     }).catch(() => {});
   }
 }
