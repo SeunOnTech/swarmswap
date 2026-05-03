@@ -15,9 +15,7 @@ export class LoggerService {
   public emit(type: string, data: Record<string, any>) {
     const event = { type, data, ts: new Date().toISOString() };
     const ndjson = JSON.stringify(event) + '\n';
-    // process.stdout.write(ndjson); // Suppressed console spam
     fs.appendFileSync(this.logPath, ndjson);
-    // Broadcast to all SSE subscribers
     this.subscribers.forEach(cb => { try { cb(event); } catch {} });
   }
 
@@ -25,7 +23,6 @@ export class LoggerService {
     this.emit('LOG', { tag, message, color });
   }
 
-  /** Subscribe to all events. Returns an unsubscribe function. */
   public subscribe(callback: EventCallback): () => void {
     this.subscribers.push(callback);
     return () => {

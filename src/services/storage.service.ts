@@ -25,7 +25,6 @@ export class StorageService {
     const content = JSON.stringify(data, null, 2);
     this.bytesUploaded += content.length;
     
-    // Ensure tmp dir exists (just in case)
     const tmpDir = path.dirname(tmpPath);
     if (!fs.existsSync(tmpDir)) {
       fs.mkdirSync(tmpDir, { recursive: true });
