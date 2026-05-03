@@ -111,7 +111,6 @@ export class SwarmController {
       og_chain: CONFIG.OG_GALILEO.chainId
     });
 
-    // LOCAL BACKUP: Save delegation to a local file to ensure it's never lost
     try {
       const storageDir = path.join(process.cwd(), 'storage');
       if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir);
@@ -120,7 +119,7 @@ export class SwarmController {
       if (fs.existsSync(backupPath)) backups = JSON.parse(fs.readFileSync(backupPath, 'utf8'));
       backups[swarmId] = delegation;
       fs.writeFileSync(backupPath, JSON.stringify(backups, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
-      process.stdout.write(`✅ Delegation backed up locally for Swarm: ${swarmId}\n`);
+      process.stdout.write(`Delegation backed up locally for Swarm: ${swarmId}\n`);
     } catch (err: any) {
       console.error('Failed to save local delegation backup:', err.message);
     }
