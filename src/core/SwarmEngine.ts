@@ -138,7 +138,6 @@ export class SwarmEngine {
     this.emit('LOOP_START', { swarm_id: this.swarmId, token_id: this.tokenId });
     const swarmAgent = new Contract(CONFIG.CONTRACTS.SWARM_AGENT, SWARM_AGENT_ABI, this.blockchain.agentOgWallet);
 
-    // Permission check — retry up to 3× on transient OG RPC errors before giving up
     let hasPerm = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -267,8 +266,6 @@ export class SwarmEngine {
         let ogBlock = 0;
         try { ogBlock = Number(await this.blockchain.ogProvider.getBlockNumber()); } catch {}
 
-        // Fetch real balances — sequential + callWithRetry to avoid batch rate limits
-        // USDC is token0, WETH is token1 in the mainnet pool → ETH price = 1e12 / 1.0001^tick
         const ethPriceUsd = 1e12 / Math.pow(1.0001, realTick);
         let nativeEthBalance = "0";
         let wethERC20Balance = "0";
@@ -341,7 +338,6 @@ export class SwarmEngine {
     const smartAccountAddress = config.smart_account.address as Address;
     const delegationManagerAddress = config.smart_account.delegation_manager as string;
 
-    // 1. READ ACTUAL BALANCES — sequential calls to avoid drpc.org batch limit
     const nativeEthRaw = await this.blockchain.callWithRetry(p => p.getBalance(smartAccountAddress));
     await new Promise(r => setTimeout(r, 80));
     const wethRaw = await this.blockchain.callWithRetry(p =>
@@ -358,7 +354,6 @@ export class SwarmEngine {
     this.emit('BALANCE_CHECK', { native_eth: nativeEthDisplay, weth: wethDisplay, usdc: usdcDisplay, smart_account: smartAccountAddress });
     this.emit('LOG', { tag: 'EXECUTOR', message: `Balance check: ${nativeEthDisplay} native ETH | ${wethDisplay} WETH | ${usdcDisplay} USDC in ${smartAccountAddress.slice(0, 10)}…`, color: 'orange' });
 
-    // Auto-wrap native ETH → WETH via delegation when no ERC20 balance exists
     let effectiveWethRaw = wethRaw;
     if (wethRaw === 0n && usdcRaw === 0n && nativeEthRaw > 0n) {
       this.emit('LOG', { tag: 'EXECUTOR', message: `⚡ Native ETH detected — attempting auto-wrap ${nativeEthDisplay} ETH → WETH via delegation…`, color: 'orange' });
@@ -392,7 +387,6 @@ export class SwarmEngine {
       }
     }
 
-    // Determine swap direction from ERC20 balances (effectiveWethRaw reflects post-wrap state)
     let fromAsset: string, toAsset: string, tokenIn: any, tokenOut: any, amountToSwap: bigint;
     if (effectiveWethRaw > 0n) {
       fromAsset = 'WETH'; toAsset = 'USDC';
@@ -426,7 +420,6 @@ export class SwarmEngine {
     }
     this.emit('QUOTE', { source: quoteSource, min_out: minOut, token_out: toAsset });
 
-    // 2.5 CHECK & EXECUTE APPROVAL IF NEEDED
     try {
       const erc20 = new Contract(tokenIn.address, ERC20_ABI, this.blockchain.sepoliaProvider);
       const allowance = await this.blockchain.callWithRetry(p => erc20.allowance(smartAccountAddress, CONFIG.CONTRACTS.SEPOLIA.SWAP_ROUTER_02));
@@ -453,7 +446,6 @@ export class SwarmEngine {
       }
     } catch (approveErr: any) {
       this.emit('LOG', { tag: 'EXECUTOR', message: `⚠️ Approval check/execution failed: ${approveErr.message}`, color: 'gold' });
-      // We continue anyway as the allowance might actually be sufficient or the error might be transient
     }
 
     // 3. BUILD REDEMPTION CALLDATA
@@ -463,7 +455,6 @@ export class SwarmEngine {
       executions: [[createExecution({ target: swapTo, value: swapValue, callData: swapCalldata })]]
     });
 
-    // 4. ESTIMATE GAS — structured failure with reason
     let gasLimit: bigint;
     try {
       const gasEstimate = await this.blockchain.callWithRetry(p => p.estimateGas({
@@ -479,7 +470,6 @@ export class SwarmEngine {
 
     this.emit('BROADCASTING', { delegation_manager: delegationManagerAddress, gas_limit: gasLimit.toString() });
 
-    // 5. BROADCAST — structured failure
     let tx: any;
     try {
       tx = await this.blockchain.agentWallet.sendTransaction({ to: delegationManagerAddress, data: redemptionCalldata, gasLimit });
@@ -489,11 +479,9 @@ export class SwarmEngine {
       throw broadcastErr;
     }
 
-    // Immediately stream tx hash so frontend can track before confirmation
     this.emit('CONFIRMING', { tx_hash: tx.hash, explorer: `https://sepolia.etherscan.io/tx/${tx.hash}`, swap: `${fromAsset}→${toAsset}` });
     this.emit('LOG', { tag: 'EXECUTOR', message: `TX submitted: ${tx.hash.slice(0, 14)}… — waiting for Sepolia confirmation…`, color: 'orange' });
 
-    // 6. WAIT FOR CONFIRMATION — structured failure with explorer link
     let receipt: any;
     try {
       receipt = await tx.wait(1);

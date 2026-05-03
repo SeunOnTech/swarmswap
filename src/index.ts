@@ -9,8 +9,6 @@ import { SwarmController } from './api/swarm.controller';
 
 dotenv.config();
 
-// Prevent any uncaught async rejection from crashing the process.
-// Engines have their own catch blocks; this is a last-resort safety net.
 process.on('unhandledRejection', (reason: any) => {
   process.stdout.write(`[WARN] Unhandled rejection (non-fatal): ${reason?.message || reason}\n`);
 });
@@ -60,12 +58,10 @@ async function main() {
     return { status: 'ok', service: 'SwarmSwap', timestamp: new Date().toISOString() };
   });
 
-  // GET /api/agent — return the agent's EOA for frontend delegation scoping
   fastify.get('/api/agent', async () => {
     return { agentAddress: blockchain.agentWallet.address };
   });
 
-  // POST /api/swarms/init — create a new swarm
   fastify.post('/api/swarms/init', async (request, reply) => {
     sysLog('\n--- Received POST /api/swarms/init ---');
     try {
