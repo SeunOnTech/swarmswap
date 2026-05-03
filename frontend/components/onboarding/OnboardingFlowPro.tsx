@@ -5,6 +5,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppKit } from "@reown/appkit/react";
 import { useAccount, useDisconnect } from "wagmi";
 import { networks } from "@/lib/web3";
+import { createSwarm, getAgentAddress } from "@/lib/api";
+import {
+  Implementation,
+  ScopeType,
+  createDelegation,
+  getSmartAccountsEnvironment,
+  toMetaMaskSmartAccount
+} from '@metamask/smart-accounts-kit';
+import { createCaveatBuilder } from '@metamask/smart-accounts-kit/utils';
+import { type Hex, type Address } from 'viem';
+import { useWalletClient, usePublicClient } from 'wagmi';
 
 type ChainName = "Ethereum" | "Arbitrum" | "Base" | "Sepolia";
 type SponsorshipTier = "Free" | "Pro" | "Custom";
@@ -40,7 +51,7 @@ const POSITIONS: Position[] = [
   { id: "p4", chain: "Sepolia", pool: "WETH / USDC", feeTier: "1.00%", range: "$2,900-$4,200", tvl: "$18,540", fees24h: "$49", ilRisk: "Low" },
 ];
 
-const steps = ["Connect", "Create", "Mint", "LP Setup", "Delegation", "Activate"];
+const steps = ["Connect", "Create", "LP Setup", "Delegation", "Mint", "Activate"];
 
 function LogoIcon() {
   return (
@@ -66,6 +77,22 @@ function ArrowIcon() {
       <path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
+}
+
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.75" />
+      <path d="M7 15H5a2 2 0 01-2-2V5a2 2 0 012-2h8a2 2 0 012 2v2" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** e.g. 0x15c6ff4b…96179074 */
+function truncateMiddleHex(value: string, headLen = 10, tailLen = 8): string {
+  const v = value.trim();
+  if (v.length <= headLen + tailLen + 1) return v;
+  return `${v.slice(0, headLen)}…${v.slice(-tailLen)}`;
 }
 
 type SegmentedProps<T extends string> = {
@@ -99,20 +126,26 @@ export default function OnboardingFlowPro() {
   const { open } = useAppKit();
   const { address, isConnected, chainId } = useAccount();
   const { disconnect } = useDisconnect();
+  const { data: walletClient } = useWalletClient();
+  const publicClient = usePublicClient();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
   const [step, setStep] = useState(1);
-  
-  const walletAddress = address 
-    ? `${address.slice(0, 6)}...${address.slice(-4)}` 
+
+  const walletAddress = address
+    ? `${address.slice(0, 6)}...${address.slice(-4)}`
     : "0x0000...0000";
 
-  const [smartAddress, setSmartAddress] = useState("0xA56B...44F1");
+  const [smartAddress, setSmartAddress] = useState("Deriving...");
   const [showSmartModal, setShowSmartModal] = useState(false);
   const [showProcessing, setShowProcessing] = useState(false);
-  const [swarmId, setSwarmId] = useState<number | null>(null);
+  const [swarmId, setSwarmId] = useState<string | null>(null);
+  const [tokenId, setTokenId] = useState<string | null>(null);
   const [configURI, setConfigURI] = useState<string>("");
   const [stateURI, setStateURI] = useState<string>("");
+  const [mintTx, setMintTx] = useState<string>("");
+  const [smartAccount, setSmartAccount] = useState<string>("");
+  const [createError, setCreateError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"All" | ChainName>("All");
   const [selectedPositions, setSelectedPositions] = useState<string[]>([]);
   const [sponsorshipTier, setSponsorshipTier] = useState<SponsorshipTier>("Free");
@@ -129,12 +162,78 @@ export default function OnboardingFlowPro() {
     return POSITIONS.filter((p) => p.chain === filter);
   }, [filter]);
 
-  const activateCreate = () => {
-    const id = Math.floor(Math.random() * 9000) + 1000;
-    setSwarmId(id);
-    setConfigURI(`0g://swarms/${id}/config.json`);
-    setStateURI(`0g://swarms/${id}/state.json`);
-    setStep(3);
+  const [isCreating, setIsCreating] = useState(false);
+  const [copiedField, setCopiedField] = useState<null | "smart" | "mint">(null);
+
+  const copyText = async (text: string, field: "smart" | "mint") => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(field);
+      window.setTimeout(() => setCopiedField((current) => (current === field ? null : current)), 2000);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const activateCreate = async () => {
+    setIsCreating(true);
+    setCreateError(null);
+    try {
+      if (!walletClient || !publicClient) throw new Error("Wallet not connected");
+
+      const agentAddress = await getAgentAddress() as Address;
+      const environment = getSmartAccountsEnvironment(11155111, '1.3.0');
+
+      const userSmartAccount = await toMetaMaskSmartAccount({
+        client: publicClient as any,
+        implementation: Implementation.Hybrid,
+        deployParams: [address as Address, [], [], []],
+        deploySalt: '0x' as Hex,
+        signer: { walletClient: walletClient as any },
+        environment
+      });
+
+      const caveats = createCaveatBuilder(environment)
+        .addCaveat('redeemer', { redeemers: [agentAddress] })
+        .build();
+
+      const delegation = createDelegation({
+        to: agentAddress,
+        from: userSmartAccount.address,
+        environment,
+        scope: {
+          type: ScopeType.FunctionCall,
+          targets: ['0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E'], 
+          selectors: ['0x04e45aaf'] 
+        },
+        caveats
+      });
+
+      const signature = await userSmartAccount.signDelegation({ delegation });
+      const signedDelegation = { ...delegation, signature };
+
+      const result = await createSwarm(
+        address,
+        '0.003',
+        userSmartAccount.address,
+        signedDelegation,
+        '1.3.0',
+        ''
+      );
+      
+      setSwarmId(result.swarmId);
+      setTokenId(result.tokenId);
+      setConfigURI(result.configURI);
+      setStateURI(result.stateURI);
+      setMintTx(result.mintTx);
+      setSmartAccount(result.smartAccount);
+      localStorage.setItem('swarmswap_swarm_id', result.swarmId);
+      localStorage.setItem('swarmswap_token_id', result.tokenId);
+    } catch (err: any) {
+      setCreateError(err.message || 'Failed to create swarm');
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   useEffect(() => {
@@ -213,12 +312,28 @@ export default function OnboardingFlowPro() {
 
   useEffect(() => {
     if (!showProcessing) return;
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       setShowProcessing(false);
+      try {
+        if (address && publicClient && walletClient) {
+          const environment = getSmartAccountsEnvironment(11155111, '1.3.0');
+          const userSmartAccount = await toMetaMaskSmartAccount({
+            client: publicClient as any,
+            implementation: Implementation.Hybrid,
+            deployParams: [address as Address, [], [], []],
+            deploySalt: '0x' as Hex,
+            signer: { walletClient: walletClient as any },
+            environment
+          });
+          setSmartAddress(`${userSmartAccount.address.slice(0, 6)}…${userSmartAccount.address.slice(-4)}`);
+        }
+      } catch (err) {
+        console.error("Failed to derive smart account address:", err);
+      }
       setShowSmartModal(true);
     }, 1800);
     return () => clearTimeout(timer);
-  }, [showProcessing]);
+  }, [showProcessing, address, publicClient, walletClient]);
 
   useEffect(() => {
     if (isConnected && step === 1) {
@@ -237,7 +352,7 @@ export default function OnboardingFlowPro() {
           SwarmSwap
         </Link>
         <div className="header-right">
-          <span className="status">Onboarding Demo</span>
+          <span className="status">Onboarding</span>
           <span className="counter">{step}/{steps.length}</span>
         </div>
       </header>
@@ -288,33 +403,15 @@ export default function OnboardingFlowPro() {
                 <Segmented label="Tick Strategy" options={["Dynamic", "Concentrated", "Wide Range"]} value={tickStrategy} onChange={setTickStrategy} />
               </div>
               <div className="actions">
-                <button className="btn ghost" onClick={() => setStep(1)}>Back</button>
-                <button className="btn primary" onClick={activateCreate}>Generate Swarm <ArrowIcon /></button>
+                <button type="button" className="btn ghost" onClick={() => setStep(1)}>Back</button>
+                <button type="button" className="btn primary" onClick={() => setStep(3)}>
+                  Continue <ArrowIcon />
+                </button>
               </div>
             </>
           )}
 
           {step === 3 && (
-            <>
-              <h1>Mint iNFT on 0G Galileo</h1>
-              <p className="sub">One signature transaction flow. In smart account mode, this can run as UserOperation.</p>
-              <div className="snapshot">
-                <p><span>Swarm</span><strong>Swarm #{swarmId}</strong></p>
-                <p><span>Config URI</span><strong>{configURI}</strong></p>
-                <p><span>State URI</span><strong>{stateURI}</strong></p>
-                <p><span>Permissions</span><strong>Agent wallet granted 0x7857abcd</strong></p>
-              </div>
-              <div className="callout">
-                <CheckIcon /> Swarm #{swarmId} created and ready for LP autonomy.
-              </div>
-              <div className="actions">
-                <button className="btn ghost" onClick={() => setStep(2)}>Back</button>
-                <button className="btn primary" onClick={() => setStep(4)}>Select LP <ArrowIcon /></button>
-              </div>
-            </>
-          )}
-
-          {step === 4 && (
             <>
               <h1>LP selection and strategy</h1>
               <p className="sub">Filter positions by chain and set per-position autonomy constraints.</p>
@@ -351,7 +448,7 @@ export default function OnboardingFlowPro() {
                 <Segmented label="Rebalance Frequency" options={["5 min", "15 min", "30 min"]} value={freq} onChange={setFreq} />
               </div>
               <div className="actions">
-                <button className="btn ghost" onClick={() => setStep(3)}>Back</button>
+                <button className="btn ghost" onClick={() => setStep(2)}>Back</button>
                 <button
                   className="btn primary"
                   disabled={selectedPositions.length === 0}
@@ -363,10 +460,12 @@ export default function OnboardingFlowPro() {
             </>
           )}
 
-          {step === 5 && (
+          {step === 4 && (
             <>
               <h1>Delegation and paymaster policy</h1>
-              <p className="sub">Session scope and sponsorship tier setup before autonomous execution begins.</p>
+              <p className="sub">
+                Session scope and sponsorship tier. Review the execution rights you are about to grant the agent EOA.
+              </p>
               <div className="permission">
                 <h3>Execution rights request</h3>
                 <ul>
@@ -379,25 +478,131 @@ export default function OnboardingFlowPro() {
               </div>
               <Segmented label="Sponsorship Tier" options={["Free", "Pro", "Custom"]} value={sponsorshipTier} onChange={setSponsorshipTier} />
               <div className="actions">
-                <button className="btn ghost" onClick={() => setStep(4)}>Back</button>
-                <button className="btn primary" onClick={() => setStep(6)}>Sign Delegation <CheckIcon /></button>
+                <button className="btn ghost" onClick={() => setStep(3)}>Back</button>
+                <button className="btn primary" onClick={() => setStep(5)}>Proceed to Mint <ArrowIcon /></button>
               </div>
+            </>
+          )}
+
+          {step === 5 && (
+            <>
+              {!swarmId ? (
+                <>
+                  <h1>Mint swarm on 0G Galileo</h1>
+                  <p className="sub">
+                    Sign the delegation policy using your wallet to authorize the agent, then create the swarm on-chain.
+                  </p>
+                  <div className="snapshot">
+                    <p><span className="snapshot-label">Risk profile</span><strong>{riskProfile}</strong></p>
+                    <p><span className="snapshot-label">Rebalance trigger</span><strong>{rebalanceTrigger}</strong></p>
+                    <p><span className="snapshot-label">Slippage limit</span><strong>{slippage}</strong></p>
+                    <p><span className="snapshot-label">Tick strategy</span><strong>{tickStrategy}</strong></p>
+                  </div>
+                  {createError && (
+                    <p className="sub" style={{ color: "#f87171", marginTop: 12 }}>{createError}</p>
+                  )}
+                  <div className="actions">
+                    <button type="button" className="btn ghost" onClick={() => setStep(4)} disabled={isCreating}>Back</button>
+                    <button type="button" className="btn primary" onClick={() => void activateCreate()} disabled={isCreating || !address}>
+                      {isCreating ? "Signing & Creating…" : <>Sign & Mint <ArrowIcon /></>}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h1>iNFT minted on 0G Galileo</h1>
+                  <p className="sub">ERC-7857 agent token deployed. Config and state are content-addressed on 0G Storage.</p>
+                  <div className="snapshot">
+                    <p><span className="snapshot-label">Swarm ID</span><strong>{swarmId}</strong></p>
+                    <p><span className="snapshot-label">Token ID</span><strong>#{tokenId}</strong></p>
+                    <p>
+                      <span className="snapshot-label">Smart Account</span>
+                      <span className="snapshot-actions">
+                        <strong>{smartAccount ? `${smartAccount.slice(0, 10)}…${smartAccount.slice(-6)}` : "—"}</strong>
+                        {smartAccount ? (
+                          <>
+                            <button
+                              type="button"
+                              className="copy-btn"
+                              aria-label="Copy smart account address"
+                              onClick={() => copyText(smartAccount, "smart")}
+                            >
+                              <CopyIcon />
+                            </button>
+                            {copiedField === "smart" ? <span className="copied-tag">Copied</span> : null}
+                          </>
+                        ) : null}
+                      </span>
+                    </p>
+                    <p>
+                      <span className="snapshot-label">Mint TX</span>
+                      <span className="snapshot-actions">
+                        {mintTx ? (
+                          <>
+                            <a
+                              href={`https://chainscan-galileo.0g.ai/tx/${mintTx}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mint-tx-link"
+                            >
+                              {truncateMiddleHex(mintTx)}
+                            </a>
+                            <button
+                              type="button"
+                              className="copy-btn"
+                              aria-label="Copy transaction hash"
+                              onClick={() => copyText(mintTx, "mint")}
+                            >
+                              <CopyIcon />
+                            </button>
+                            {copiedField === "mint" ? <span className="copied-tag">Copied</span> : null}
+                          </>
+                        ) : (
+                          <strong>—</strong>
+                        )}
+                      </span>
+                    </p>
+                  </div>
+                  <div className="callout">
+                    <CheckIcon /> Swarm {swarmId} minted successfully on 0G Galileo.
+                  </div>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => {
+                        setSwarmId(null);
+                        setTokenId(null);
+                        setConfigURI("");
+                        setStateURI("");
+                        setMintTx("");
+                        setSmartAccount("");
+                        setCreateError(null);
+                        setStep(3);
+                      }}
+                    >
+                      Back
+                    </button>
+                    <button type="button" className="btn primary" onClick={() => setStep(6)}>Finish Setup <ArrowIcon /></button>
+                  </div>
+                </>
+              )}
             </>
           )}
 
           {step === 6 && (
             <>
               <h1>Agent active</h1>
-              <p className="sub">Onboarding is complete and autonomy has been activated for selected LP positions.</p>
+              <p className="sub">Onboarding complete. If you minted via the API, the server engine is already looping; revoke autonomy anytime from the swarm feeds page (Pause run) — that stops the backend only.</p>
               <div className="snapshot">
-                <p><span>Status</span><strong>Gas sponsored and active, next cycle 15s</strong></p>
-                <p><span>Sponsorship</span><strong>{sponsorshipTier}</strong></p>
-                <p><span>Delegation</span><strong>Session key anchored to 0G iNFT state</strong></p>
-                <p><span>Positions</span><strong>{selectedPositions.length} position(s) configured</strong></p>
+                <p><span className="snapshot-label">Status</span><strong>Engine active — next cycle in 15s</strong></p>
+                <p><span className="snapshot-label">Swarm ID</span><strong>{swarmId || '—'}</strong></p>
+                <p><span className="snapshot-label">Sponsorship</span><strong>{sponsorshipTier}</strong></p>
+                <p><span className="snapshot-label">Delegation</span><strong>Session key anchored to 0G iNFT state</strong></p>
               </div>
               <div className="actions">
                 <button className="btn ghost" onClick={() => setStep(1)}>Restart</button>
-                <Link href="/app/dashboard" className="btn primary link-btn">Go to Dashboard <ArrowIcon /></Link>
+                <Link href={`/app/dashboard?swarmId=${swarmId}`} className="btn primary link-btn">Go to Dashboard <ArrowIcon /></Link>
               </div>
             </>
           )}
@@ -418,7 +623,9 @@ export default function OnboardingFlowPro() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Smart account linkage">
           <div className="modal-card">
             <h2>Smart account setup</h2>
-            <p className="sub">Swarm agent interactions route through your dedicated smart account, cryptographically linked to your wallet.</p>
+            <p className="sub">
+              SwarmSwap creates a dedicated MetaMask Hybrid Smart Account on your behalf. This gives the agent isolated execution permissions while you retain ultimate root ownership of the account.
+            </p>
             <div className="link-visual">
               <div className="node">
                 <span className="node-label">Wallet</span>
@@ -443,9 +650,8 @@ export default function OnboardingFlowPro() {
               <button
                 className="btn primary"
                 onClick={() => {
-                  setSmartAddress("0xA56B...44F1");
                   setShowSmartModal(false);
-                  setStep(5);
+                  setStep(4);
                 }}
               >
                 Continue <ArrowIcon />
@@ -742,8 +948,57 @@ h1 {
   font-size: 13px;
 }
 
-.snapshot span {
+.snapshot-label {
   color: #9e9cb6;
+  flex-shrink: 0;
+}
+
+.snapshot-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.snapshot-actions strong {
+  color: #f5f4f9;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.mint-tx-link {
+  color: #a78bfa;
+  text-decoration: none;
+}
+
+.mint-tx-link:hover {
+  text-decoration: underline;
+}
+
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.05);
+  color: #a09fba;
+  cursor: pointer;
+}
+
+.copy-btn:hover {
+  color: #c4b5fd;
+  border-color: rgba(124,58,237,0.45);
+}
+
+.copied-tag {
+  font-size: 11px;
+  color: #86efac;
+  font-weight: 600;
 }
 
 .snapshot strong {
@@ -1066,6 +1321,41 @@ h1 {
 
 @keyframes orb-breathe {
   0%,100% { opacity: .8; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 1; transform: translate(-50%, -52%) scale(1.06); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes loader-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+
+@keyframes ring-spin-a {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ring-spin-b {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes travel {
+  from { transform: translateX(0); }
+  to { transform: translateX(150px); }
+}
+
+@keyframes travel-y {
+  from { transform: translateY(0); }
+  to { transform: translateY(80px); }
+}
+
+@keyframes orb-breathe {
+  0%, 100% { opacity: .8; transform: translate(-50%, -50%) scale(1); }
   50% { opacity: 1; transform: translate(-50%, -52%) scale(1.06); }
 }
 
