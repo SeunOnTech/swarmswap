@@ -1,12 +1,15 @@
 import { Contract, ethers, keccak256, JsonRpcProvider, parseEther, toUtf8Bytes } from 'ethers';
+import * as fs from 'fs';
+import * as path from 'path';
 import { Address } from 'viem';
 import { BlockchainService } from '../services/blockchain.service';
 import { StorageService } from '../services/storage.service';
 import { LoggerService } from '../services/logger.service';
-import { CONFIG, SWARM_AGENT_ABI, POOL_ABI, allowedAgentsFilter } from '../config/constants';
+import { CONFIG, SWARM_AGENT_ABI, POOL_ABI } from '../config/constants';
 import { RuntimeConfig, RuntimeState } from '../types';
 import { SwarmEngine } from '../core/SwarmEngine';
 import { ComputeService } from '../services/compute.service';
+import { getSmartAccountsEnvironment } from '@metamask/smart-accounts-kit';
 import { SwapService } from '../services/swap.service';
 
 export class SwarmController {
@@ -34,12 +37,6 @@ export class SwarmController {
     return 0;
   }
 
-  /**
-   * Creates a new swarm by reusing the existing smart account + delegation
-   * already set up on-chain (from the standalone script's --mode setup).
-   * This is the correct pattern for the hackathon demo: one smart account,
-   * many independent swarms with their own state and iNFT.
-   */
   async initializeSwarm(
     userAddress: Address,
     amount: string = '0.003',
@@ -65,7 +62,7 @@ export class SwarmController {
       smart_account: {
         implementation: 'Hybrid',
         address: smartAccountAddress || ('0x0000000000000000000000000000000000000000' as Address),
-        delegation_manager: '0x39a00aBe601DE7a731804f3db6E33De6C4eE3B16', // Fallback manager if not provided
+        delegation_manager: getSmartAccountsEnvironment(CONFIG.SEPOLIA.chainId, CONFIG.SMART_ACCOUNTS_VERSION).DelegationManager, // Fallback manager if not provided
         pimlico_rpc_url: pimlicoRpcUrl || '',
         environment_version: environmentVersion || CONFIG.SMART_ACCOUNTS_VERSION,
         deployment_user_op_hash: '0x',
@@ -114,6 +111,20 @@ export class SwarmController {
       og_chain: CONFIG.OG_GALILEO.chainId
     });
 
+    // LOCAL BACKUP: Save delegation to a local file to ensure it's never lost
+    try {
+      const storageDir = path.join(process.cwd(), 'storage');
+      if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir);
+      const backupPath = path.join(storageDir, 'delegations.json');
+      let backups: Record<string, any> = {};
+      if (fs.existsSync(backupPath)) backups = JSON.parse(fs.readFileSync(backupPath, 'utf8'));
+      backups[swarmId] = delegation;
+      fs.writeFileSync(backupPath, JSON.stringify(backups, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+      process.stdout.write(`✅ Delegation backed up locally for Swarm: ${swarmId}\n`);
+    } catch (err: any) {
+      console.error('Failed to save local delegation backup:', err.message);
+    }
+
     await this.startEngine(swarmId, tokenId.toString());
 
     return {
@@ -126,7 +137,6 @@ export class SwarmController {
     };
   }
 
-  /** Returns metadata for all running engines */
   getSwarms() {
     return Array.from(this.engines.entries()).map(([swarmId, engine]) => ({
       swarmId,
@@ -135,7 +145,6 @@ export class SwarmController {
     }));
   }
 
-  /** Stop the backend execution loop for this swarm (does not burn NFT or revoke on-chain delegation). */
   stopEngine(swarmId: string): { ok: boolean; error?: string } {
     const engine = this.engines.get(swarmId);
     if (!engine) return { ok: false, error: 'No running engine for this swarm id' };
@@ -169,38 +178,31 @@ export class SwarmController {
       });
   }
 
-  /**
-   * On server start: scan 0G Galileo for whitelisted agents and restart their engines.
-   */
   async resyncAgents() {
     process.stdout.write('Resyncing existing agents from 0G Galileo...\n');
     const swarmAgent = new Contract(CONFIG.CONTRACTS.SWARM_AGENT, SWARM_AGENT_ABI, this.blockchain.agentOgWallet);
 
     try {
-      const total = await swarmAgent.totalAgents();
+      const total = Number(await swarmAgent.totalAgents());
       process.stdout.write(`Found ${total} agents in the registry.\n`);
+      if (total === 0) return;
 
-      const allowedOnly = allowedAgentsFilter();
-      if (allowedOnly === null) process.stdout.write('Resync: starting engines for all agent token IDs (set ALLOWED_AGENT_IDS to restrict).\n');
-      else process.stdout.write(`Resync: whitelist token IDs only: ${allowedOnly.join(', ')}\n`);
-      for (let i = 1; i <= Number(total); i++) {
-        if (allowedOnly !== null && !allowedOnly.includes(i)) continue;
+      const latestId = total;
+      process.stdout.write(`Resync: starting latest agent only (token #${latestId}).\n`);
 
-        try {
-          const agentData = await swarmAgent.agents(i);
-          const configRootHash = (agentData.configURI as string).replace(/^ipfs:\/\//, '');
-          const config = await this.storage.downloadJson(configRootHash) as RuntimeConfig;
-          const swarmId = config.swarmId || `recovered-${i}`;
+      try {
+        const agentData = await swarmAgent.agents(latestId);
+        const configRootHash = (agentData.configURI as string).replace(/^ipfs:\/\//, '');
+        const config = await this.storage.downloadJson(configRootHash) as any;
+        const swarmId = config.id || keccak256(toUtf8Bytes(latestId.toString())).slice(2, 10);
 
-          if (this.engines.has(swarmId)) continue;
-          process.stdout.write(`Restarting agent for Swarm: ${swarmId} (Token: ${i})\n`);
-          await this.startEngine(swarmId, i.toString());
-        } catch (err: any) {
-          console.error(`Failed to recover agent ${i}:`, err.message);
-        }
+        process.stdout.write(`Restarting agent for Swarm: ${swarmId} (Token: ${latestId})\n`);
+        await this.startEngine(swarmId, latestId.toString());
+      } catch (err: any) {
+        process.stdout.write(`Failed to resync agent #${latestId}: ${err.message}\n`);
       }
     } catch (err: any) {
-      console.error('Failed to resync agents:', err.message);
+      process.stdout.write(`Resync failed: ${err.message}\n`);
     }
   }
 }
