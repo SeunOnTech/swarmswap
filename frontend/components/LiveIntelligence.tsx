@@ -3,6 +3,8 @@
 import Link from "next/link";
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { stopSwarm, subscribeToSwarm } from "@/lib/api";
+import { AssetLogo } from "@/components/AssetLogo";
+import { BRAND_LOGO_URLS, getTokenLogoUrl } from "@/lib/assetLogos";
 
 // ─── types ─────────────────────────────────────────────────────────────────────
 interface CanvasNode { x:number; y:number; vx:number; vy:number; r:number; pulse:number; }
@@ -287,7 +289,7 @@ const LiveIntelligence: React.FC<LiveIntelligenceProps> = ({ swarmId }) => {
   const [boundsHistory, setBoundsHistory] = useState<{lower:number, upper:number}[]>([{lower:198650, upper:199050}]);
   
   const [positionValue, setPositionValue] = useState("Loading...");
-  const [wethBalance, setWethBalance] = useState("— WETH");
+  const [wethBalance, setWethBalance] = useState("— ETH");
   const [usdcBalance, setUsdcBalance] = useState("— USDC");
   const [currentTickStr, setCurrentTickStr] = useState("198850");
   const [smartAccount, setSmartAccount] = useState<string | null>(null);
@@ -369,13 +371,15 @@ const LiveIntelligence: React.FC<LiveIntelligenceProps> = ({ swarmId }) => {
         setAnchorCount(d.anchors_count || 0);
         setStorageKB(Number(d.storage_used_kb) || 0);
         setLatestBlock(d.latest_og_block || 0);
-        if (d.weth_balance) {
-            setWethBalance(`${Number(d.weth_balance).toFixed(4)} WETH`);
-            setUsdcBalance(`${Number(d.usdc_balance).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})} USDC`);
-            setPositionValue(`$${Number(d.position_value).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`);
+        // eth_balance = native ETH + WETH combined; weth_balance = ERC20 WETH only (legacy)
+        const ethBal = d.eth_balance ?? d.weth_balance;
+        if (ethBal !== undefined) {
+          setWethBalance(`${Number(ethBal).toFixed(4)} ETH`);
+          setUsdcBalance(`${Number(d.usdc_balance).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})} USDC`);
+          setPositionValue(`$${Number(d.position_value).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`);
         }
         if (d.smart_account_address) {
-            setSmartAccount(d.smart_account_address);
+          setSmartAccount(d.smart_account_address);
         }
         return;
       }
@@ -490,6 +494,7 @@ const LiveIntelligence: React.FC<LiveIntelligenceProps> = ({ swarmId }) => {
             <div style={s.identityBlock}>
               <div style={s.identityHeadline}>
                 <span style={s.galileoChip} title="0G Galileo testnet">
+                  <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={14} />
                   <span style={s.galileoChipDot} aria-hidden />
                   0G Galileo
                 </span>
@@ -581,26 +586,45 @@ const LiveIntelligence: React.FC<LiveIntelligenceProps> = ({ swarmId }) => {
             {/* chart */}
             <div style={s.chartPanel}>
               <div style={s.panelHead}>
-                <span style={s.panelTitle}>Concentrated Liquidity Tick Bounds — ETH/USDC</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={s.panelTitle}>Concentrated Liquidity Tick Bounds —</span>
+                  <span style={{ ...s.panelTitle, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <AssetLogo src={getTokenLogoUrl("WETH")} alt="" size={14} />
+                    <AssetLogo src={getTokenLogoUrl("USDC")} alt="" size={14} />
+                    ETH/USDC
+                  </span>
+                </div>
                 <div style={{...s.chartStats, flexWrap: "wrap", rowGap: 8}}>
                   {([
-                    [positionValue, "#f5f4f9", "Position Value"],
-                    [wethBalance,   "#4ade80", "ETH Balance"],
-                    [usdcBalance,   "#60a5fa", "USDC Balance"],
-                    [currentTickStr,"#a78bfa", "Current Tick"],
-                  ] as [string,string,string][]).map(([v,c,l]) => (
+                    [positionValue, "#f5f4f9", "Position Value", null as string | null],
+                    [wethBalance,   "#4ade80", "ETH Balance", "WETH"],
+                    [usdcBalance,   "#60a5fa", "USDC Balance", "USDC"],
+                    [currentTickStr,"#a78bfa", "Current Tick", null],
+                  ] as [string,string,string,string|null][]).map(([v,c,l,tok]) => (
                     <div key={l} style={s.cstat}>
                       <span style={{...s.cstatVal, color:c}}>{v}</span>
-                      <span style={s.cstatLbl}>{l}</span>
+                      <span style={{ ...s.cstatLbl, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        {tok ? <AssetLogo src={getTokenLogoUrl(tok)} alt="" size={12} /> : null}
+                        {l}
+                      </span>
                     </div>
                   ))}
                 </div>
               </div>
               <StrategyChart ticks={ticks} boundsHistory={boundsHistory} rebalances={rebalances} />
               <div style={s.chartLegend}>
-                {([["#4ade80","ETH/USDC Tick"],["rgba(167,139,250,0.5)","LP Range Bounds"],["#a78bfa","Active Zone"],["#f5f4f9","Rebalance Trigger"]] as [string,string][]).map(([c,l]) => (
+                {([["#4ade80","ETH/USDC Tick", true],["rgba(167,139,250,0.5)","LP Range Bounds", false],["#a78bfa","Active Zone", false],["#f5f4f9","Rebalance Trigger", false]] as [string,string,boolean][]).map(([c,l,showPair]) => (
                   <div key={l} style={s.legendItem}>
-                    <div style={{...s.legendDot, background:c}} />{l}
+                    <div style={{...s.legendDot, background:c}} />
+                    {showPair ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <AssetLogo src={getTokenLogoUrl("WETH")} alt="" size={11} />
+                        <AssetLogo src={getTokenLogoUrl("USDC")} alt="" size={11} />
+                        {l}
+                      </span>
+                    ) : (
+                      l
+                    )}
                   </div>
                 ))}
               </div>

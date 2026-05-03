@@ -2,6 +2,8 @@
 
 import React, { useEffect, useRef } from "react";
 import Link from "next/link";
+import { AssetLogo } from "@/components/AssetLogo";
+import { BRAND_LOGO_URLS, getChainLogoUrl, getLogoForTickerName, PROTOCOL_LOGO_URLS } from "@/lib/assetLogos";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 interface Node {
@@ -157,6 +159,7 @@ const SwarmHero: React.FC = () => {
         {/* badge */}
         <div className="fade-item" style={s.badge}>
           <span style={s.badgeDot} />
+          <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={14} />
           Autonomous Agents Active on 0G
         </div>
 
@@ -168,8 +171,17 @@ const SwarmHero: React.FC = () => {
 
         {/* sub */}
         <p className="fade-item" style={s.sub}>
-          Deploy agentic LPs that self-coordinate on <strong style={s.subStrong}>0G Storage</strong> and execute on 
-          <strong style={s.subStrong}> Uniswap</strong>. No manual rebalancing. Just yield.
+          Deploy agentic LPs that self-coordinate on{" "}
+          <strong style={{ ...s.subStrong, display: "inline-flex", alignItems: "center", gap: 5, verticalAlign: "middle" }}>
+            <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={15} />
+            0G Storage
+          </strong>{" "}
+          and execute on{" "}
+          <strong style={{ ...s.subStrong, display: "inline-flex", alignItems: "center", gap: 5, verticalAlign: "middle" }}>
+            <AssetLogo src={PROTOCOL_LOGO_URLS.uniswap} alt="" size={15} />
+            Uniswap
+          </strong>
+          . No manual rebalancing. Just yield.
         </p>
 
         {/* CTAs */}
@@ -209,7 +221,10 @@ const SwarmHero: React.FC = () => {
             {ORBIT_LG.map((node, i) => (
               <div key={i} className="a-node-lg" style={{ ...s.aNode, transformOrigin: "0 155px", transform: `rotate(${node.angle}deg)` }}>
                 <div className="a-chip-lg" style={s.aChip}>
-                  <ChipDot color={node.color} /> {node.label}
+                  <ChipDot color={node.color} />
+                  {node.label.includes("0G") ? <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={12} /> : null}
+                  {node.label.includes("Sepolia") ? <AssetLogo src={getChainLogoUrl("Sepolia")} alt="" size={12} /> : null}
+                  {node.label}
                 </div>
               </div>
             ))}
@@ -237,7 +252,10 @@ const SwarmHero: React.FC = () => {
         <div style={s.tickerTrack}>
           {doubled.map((item, i) => (
             <span key={i} style={s.tItem}>
-              <span style={s.tName}>{item.name}</span>
+              <span style={{ ...s.tName, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <AssetLogo src={getLogoForTickerName(item.name)} alt="" size={14} />
+                {item.name}
+              </span>
               <span style={item.up ? s.tUp : s.tDown}>{item.val}</span>
               <span style={s.tSep}>·</span>
             </span>

@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useState, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { getSwarms, subscribeToSwarm, type SwarmInfo } from "@/lib/api";
+import { AssetLogo } from "@/components/AssetLogo";
+import { BRAND_LOGO_URLS, getChainLogoUrl, getTokenLogoUrl } from "@/lib/assetLogos";
 
 function LogoIcon() {
   return (
@@ -134,7 +136,12 @@ export default function DashboardPage() {
                     <div style={s.swarmTop}>
                       <div>
                         <p style={s.swarmId}>Swarm {swarm.swarmId}</p>
-                        <h3 style={s.swarmTitle}>Token #{swarm.tokenId} · WETH/USDC V3</h3>
+                        <h3 style={{ ...s.swarmTitle, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span>Token #{swarm.tokenId} ·</span>
+                          <AssetLogo src={getTokenLogoUrl("WETH")} alt="" size={18} />
+                          <AssetLogo src={getTokenLogoUrl("USDC")} alt="" size={18} />
+                          <span>WETH/USDC V3</span>
+                        </h3>
                       </div>
                       <span style={{
                         ...s.statusPill,
@@ -142,15 +149,30 @@ export default function DashboardPage() {
                       }}>{swarm.status}</span>
                     </div>
                     <div style={{ ...s.metrics, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : s.metrics.gridTemplateColumns }}>
-                      <p style={s.metric}><span>Chain</span><strong>Sepolia</strong></p>
-                      <p style={s.metric}><span>Coordination</span><strong>0G Galileo</strong></p>
+                      <p style={s.metric}>
+                        <span>Chain</span>
+                        <strong style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <AssetLogo src={getChainLogoUrl("Sepolia")} alt="" size={16} />
+                          Sepolia
+                        </strong>
+                      </p>
+                      <p style={s.metric}>
+                        <span>Coordination</span>
+                        <strong style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={16} />
+                          0G Galileo
+                        </strong>
+                      </p>
                       <p style={s.metric}><span>Return</span><strong>{Number(metrics.total_return_pct) >= 0 ? '+' : ''}{metrics.total_return_pct}%</strong></p>
                       <p style={s.metric}><span>0G Block</span><strong>{metrics.latest_og_block || '—'}</strong></p>
                       <p style={s.metric}><span>Storage</span><strong>{metrics.storage_used_kb} KB</strong></p>
                     </div>
                   </Link>
                   <div style={s.swarmActions}>
-                    <a href={`https://sepolia.etherscan.io/address/${swarm.swarmId}`} target="_blank" rel="noreferrer" style={s.actionGhost}>Sepolia</a>
+                    <a href={`https://sepolia.etherscan.io/address/${swarm.swarmId}`} target="_blank" rel="noreferrer" style={{ ...s.actionGhost, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <AssetLogo src={getChainLogoUrl("Sepolia")} alt="" size={14} />
+                      Sepolia
+                    </a>
                     <button style={s.actionGhost}>Logs</button>
                     <span style={{ ...s.actionPrimary, cursor: 'default' }}>Engine Running</span>
                   </div>
@@ -181,7 +203,10 @@ export default function DashboardPage() {
             </article>
 
             <article style={s.sidePanel}>
-              <h2 style={s.sideTitle}>0G Network</h2>
+              <h2 style={{ ...s.sideTitle, display: "flex", alignItems: "center", gap: 8 }}>
+                <AssetLogo src={BRAND_LOGO_URLS.zeroGGalileo} alt="" size={18} />
+                0G Network
+              </h2>
               <div style={s.controlGrid}>
                 <div style={s.statRow}><span>Latest Block</span><strong>{metrics.latest_og_block || '—'}</strong></div>
                 <div style={s.statRow}><span>Storage Used</span><strong>{metrics.storage_used_kb} KB</strong></div>
